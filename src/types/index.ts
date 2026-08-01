@@ -49,37 +49,65 @@ export interface Profile {
   verification_requested_at?: string | null
 }
 
+// Mirrors the `user_loyalty` table (Frontend migration 007_loyalty_rewards.sql).
 export interface LoyaltyState {
+  id: string
   user_id: string
   tier: LoyaltyTier
-  points_earned: number
-  points_redeemed: number
-  points_balance: number
+  total_points: number
+  available_points: number
+  lifetime_points: number
+  deals_completed: number
+  total_volume_usd: number
+  current_streak: number
+  longest_streak: number
+  tier_progress: number
+  next_tier_threshold: number
+  joined_at: string
+  tier_updated_at: string
+  created_at: string
+  updated_at: string
 }
 
+// Mirrors the `loyalty_transactions` table.
 export interface LoyaltyTransaction {
   id: string
   user_id: string
-  created_at: string
-  type: 'earned' | 'redeemed' | 'bonus' | 'referral'
   points: number
-  description: string
+  transaction_type: string
+  description: string | null
+  reference_id: string | null
+  reference_type: string | null
+  created_at: string
 }
 
+// Mirrors the `rewards` table.
 export interface Reward {
   id: string
-  title: string
-  description: string
+  name: string
+  description: string | null
   points_cost: number
+  category: string
   tier_required: LoyaltyTier
+  icon: string | null
+  is_active: boolean
+  quantity_available: number | null
+  expires_at: string | null
+  created_at: string
 }
 
+// Mirrors the `achievements` table.
 export interface Achievement {
   id: string
-  title: string
-  description: string
-  icon: string
+  name: string
+  description: string | null
+  icon: string | null
+  category: string | null
   points_reward: number
+  requirement_type: string | null
+  requirement_value: number | null
+  is_active: boolean
+  created_at: string
 }
 
 export interface VoiceRoom {

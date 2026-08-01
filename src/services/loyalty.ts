@@ -34,15 +34,17 @@ export function getTierProgress(points: number): { current: LoyaltyTier; next: L
 
 export async function getUserLoyalty(userId: string): Promise<LoyaltyState & { tier: LoyaltyTier; progress: ReturnType<typeof getTierProgress> }> {
   const { data, error } = await supabase
-    .from('loyalty')
+    .from('user_loyalty')
     .select('*')
     .eq('user_id', userId)
     .single()
 
   if (error || !data) throw Object.assign(new Error('Loyalty record not found'), { statusCode: 404 })
 
-  const tier = getTier(data.points_earned)
-  const progress = getTierProgress(data.points_earned)
+  // Tier is derived from cumulative points earned over the account's lifetime,
+  // so redeeming (which only reduces available_points) never lowers a tier.
+  const tier = getTier(data.lifetime_points)
+  const progress = getTierProgress(data.lifetime_points)
   return { ...data, tier, progress }
 }
 
@@ -81,19 +83,21 @@ export async function redeemReward(userId: string, rewardId: string): Promise<vo
     .single()
 
   if (rewardError || !reward) throw Object.assign(new Error('Reward not found'), { statusCode: 404 })
-  if (loyalty.points_balance < reward.points_cost) throw Object.assign(new Error('Insufficient points'), { statusCode: 400 })
+  if (loyalty.available_points < reward.points_cost) throw Object.assign(new Error('Insufficient points'), { statusCode: 400 })
 
-  const { error } = await supabase.from('loyalty_redemptions').insert({
+  const { error } = await supabase.from('reward_redemptions').insert({
     user_id: userId,
     reward_id: rewardId,
     points_spent: reward.points_cost,
+    status: 'pending',
   })
 
   if (error) throw new Error(error.message)
 
+  // Spend from the redeemable balance only; lifetime_points (tier) is untouched.
   await supabase
-    .from('loyalty')
-    .update({ points_redeemed: loyalty.points_redeemed + reward.points_cost })
+    .from('user_loyalty')
+    .update({ available_points: loyalty.available_points - reward.points_cost })
     .eq('user_id', userId)
 }
 
