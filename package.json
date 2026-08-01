@@ -1,0 +1,32 @@
+{
+  "name": "staunton-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/jwt": "^10.1.0",
+    "@fastify/multipart": "^10.0.0",
+    "@fastify/websocket": "^11.2.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
