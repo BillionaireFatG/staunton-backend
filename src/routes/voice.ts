@@ -5,11 +5,19 @@ import * as voiceService from '../services/voice'
 
 const roomParams = z.object({ id: z.string().uuid('room id must be a UUID') })
 const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) })
-const statusBody = z.object({
-  is_muted: z.boolean().optional(),
-  is_speaking: z.boolean().optional(),
-})
-const messageBody = z.object({ content: z.string().trim().min(1).max(4000) })
+// `.strict()`, matching deals.ts / profiles.ts / notifications.ts. Without it
+// Zod silently STRIPS unknown keys, so `{is_muted:true, user_id:"<victim>"}`
+// returned 204 as though the whole body had been accepted. The service
+// re-whitelists, so nothing was ever written — but a caller could not tell a
+// rejected field from an applied one, and that is exactly the ambiguity that
+// hides the next mass-assignment bug.
+const statusBody = z
+  .object({
+    is_muted: z.boolean().optional(),
+    is_speaking: z.boolean().optional(),
+  })
+  .strict()
+const messageBody = z.object({ content: z.string().trim().min(1).max(4000) }).strict()
 
 // Every route requires a Supabase JWT. Being authenticated is NOT by itself
 // authorization to touch a given room — the per-room access check lives in
