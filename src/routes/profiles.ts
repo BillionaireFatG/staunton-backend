@@ -41,7 +41,16 @@ export async function profilesRoutes(app: FastifyInstance) {
   // `limit` is bounded at the route AND clamped again in the service. It was
   // previously `parseInt(limit)` straight into `.limit()` — `?limit=100000`
   // with an empty `q` dumped the whole member directory.
-  app.get('/search', async (req) => {
+  //
+  // Capping the page size only raises the cost of scraping the directory; it
+  // does not stop it, because a caller can still walk the prefix space two
+  // characters at a time. On an invite-only platform the member list is itself
+  // the sensitive asset, so this is throttled well below the global limit.
+  // Keyed per account (see app.ts), so this is 30 searches/min per member, not
+  // per office IP.
+  app.get('/search', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (req) => {
     const { q, limit } = searchQuery.parse(req.query ?? {})
     return profilesService.searchProfiles(q, limit)
   })

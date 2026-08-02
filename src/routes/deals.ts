@@ -92,7 +92,12 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.status(201).send(event)
   })
 
-  app.get('/counterparties/search', async (req) => {
+  // Same reasoning as GET /api/profiles/search: a bounded page size raises the
+  // cost of enumerating the member directory but does not prevent it. Throttled
+  // per account, well below the global limit.
+  app.get('/counterparties/search', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (req) => {
     const { q } = searchQuerySchema.parse(req.query ?? {})
     return dealsService.searchCounterparties(q, req.userId)
   })
