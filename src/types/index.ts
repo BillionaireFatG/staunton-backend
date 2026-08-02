@@ -277,3 +277,63 @@ export interface ApiError {
   error: string
   message: string
 }
+
+// ── Subscriptions ───────────────────────────────────────────────────────────
+// Foundation only: there is no payment provider wired up. See
+// services/subscriptions.ts and migrations/0011_subscriptions_foundation.sql.
+
+/**
+ * One entitlement value.
+ *
+ * `limit` with `value: null` means UNLIMITED. An ABSENT key means NOT ENTITLED.
+ * Those two must never be conflated — they fail in opposite directions — which
+ * is why unlimited is an explicit row rather than an omitted one.
+ */
+export type EntitlementValue =
+  | { type: 'boolean'; value: boolean }
+  | { type: 'limit'; value: number | null }
+  | { type: 'string'; value: string }
+
+/** Where the effective value came from: the base floor, or the paid plan. */
+export type EntitlementSource = 'base' | 'plan'
+
+export type Entitlements = Record<string, EntitlementValue & { source: EntitlementSource }>
+
+export interface SubscriptionPlan {
+  id: string
+  key: string
+  name: string
+  description: string | null
+  /**
+   * NULL until real pricing is configured. Never 0 and never a placeholder
+   * number — a fabricated price is the one figure that must not reach a trading
+   * desk. Branch on `pricing_status`, not on this being null.
+   */
+  price: number | null
+  currency: string
+  interval: 'month' | 'year' | string
+  pricing_status: 'set' | 'not_set'
+  /** Sellable. False on every seeded plan until the founder sets a real price. */
+  is_active: boolean
+  /** The fail-closed floor every member firm gets with no subscription. */
+  is_base: boolean
+  sort_order: number
+}
+
+/**
+ * `status` is the stored subscription status, plus `'none'` for a firm that has
+ * never had one — reported rather than 404ing, so clients render one shape.
+ * `is_granting` is the only field that should gate a feature; a status string
+ * comparison in a client will drift from the SQL.
+ */
+export interface OrgSubscription {
+  org_id: string
+  plan_key: string
+  plan_name: string
+  status: 'none' | 'trialing' | 'active' | 'past_due' | 'canceled' | 'expired' | string
+  is_granting: boolean
+  started_at: string | null
+  current_period_end: string | null
+  canceled_at: string | null
+  entitlements: Entitlements
+}

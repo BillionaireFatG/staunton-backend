@@ -442,10 +442,15 @@ async function main() {
         'Supabase SQL editor, then run this again — the AFTER run is what demonstrates the fix.',
     )
   }
-  process.exit(failures === 0 ? 0 : 1)
+  // exitCode rather than process.exit(): an abrupt exit while the Supabase
+  // client still holds handles trips a libuv assertion on Windows, which would
+  // mask the real exit status this script exists to report.
+  process.exitCode = failures === 0 ? 0 : 1
 }
 
 main().catch((e) => {
   console.error(e)
-  cleanup().finally(() => process.exit(1))
+  cleanup().finally(() => {
+    process.exitCode = 1
+  })
 })

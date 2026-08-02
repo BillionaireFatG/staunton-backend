@@ -14,6 +14,7 @@ import { adminVettingRoutes } from './routes/adminVetting'
 import { onboardingRoutes } from './routes/onboarding'
 import { accessRoutes } from './routes/access'
 import { notificationsRoutes } from './routes/notifications'
+import { subscriptionsRoutes } from './routes/subscriptions'
 
 /**
  * Proxy trust.
@@ -180,6 +181,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.register(onboardingRoutes, { prefix: '/api/onboarding' })
   app.register(accessRoutes, { prefix: '/api/access' })
   app.register(notificationsRoutes, { prefix: '/api/notifications' })
+  app.register(subscriptionsRoutes, { prefix: '/api/subscriptions' })
 
   app.get('/health', async () => ({ status: 'ok' }))
 

@@ -45,6 +45,7 @@ const MUST_BE_AUTHENTICATED = [
   '/api/notifications',
   '/api/onboarding',
   '/api/profiles',
+  '/api/subscriptions',
   '/api/voice-rooms',
 ].sort()
 
