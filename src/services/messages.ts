@@ -143,7 +143,29 @@ export async function getConversations(userId: string, limit = 50): Promise<Conv
     p_limit: clampLimit(limit, 50, 100),
   })
 
-  if (error) throw new Error(error.message)
+  if (error) {
+    // PGRST202 = "function not found in the schema cache", i.e. migration 0009
+    // has not been applied to this database yet.
+    //
+    // This deserves its own branch rather than falling into the generic 500.
+    // This endpoint is the founder's designated core surface, and while 0009 is
+    // pending it returns an opaque "An unexpected error occurred" that reads as
+    // a code defect and sends whoever sees it hunting through the handler. It is
+    // not a code defect — it is a deployment step that has not happened.
+    //
+    // Deliberately NOT a second, RPC-free implementation of the same query. That
+    // would mean two copies of the last-message / unread / counterparty logic
+    // drifting apart, and the fallback would be the unbounded-embed shape 0009
+    // exists to kill. One implementation, and a failure that names its own fix.
+    if ((error as { code?: string }).code === 'PGRST202') {
+      throw err(
+        'Conversation list is unavailable: database migration 0009_messaging_authz_hardening.sql ' +
+          'has not been applied. Apply it in the Supabase SQL editor.',
+        503,
+      )
+    }
+    throw new Error(error.message)
+  }
 
   return ((data ?? []) as Record<string, any>[]).map((r) => ({
     id: r.id,
