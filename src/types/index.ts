@@ -110,13 +110,27 @@ export interface Achievement {
   created_at: string
 }
 
+/**
+ * Matches the DEPLOYED `voice_rooms` table, which is not what this interface
+ * used to claim. It previously declared `topic`, `host_id` and `is_active` —
+ * none of which exist in the database — and omitted every column that does.
+ * `getVoiceRooms()` filtered on `.eq('is_active', true)` and so returned a
+ * PostgREST error ("column voice_rooms.is_active does not exist") on every call.
+ *
+ * `is_public` is the room's access control signal; see services/voice.ts.
+ */
 export interface VoiceRoom {
   id: string
   created_at: string
   name: string
-  topic?: string
-  host_id: string
-  is_active: boolean
+  category: string | null
+  emoji: string | null
+  description: string | null
+  /** Access gate: public rooms are open to any member, private ones require an
+   *  existing voice_participants row. */
+  is_public: boolean
+  /** Agora SDK channel. Effectively a join credential — see services/voice.ts. */
+  agora_channel_name: string | null
   participant_count?: number
 }
 
