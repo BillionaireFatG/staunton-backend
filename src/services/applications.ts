@@ -107,6 +107,10 @@ export async function validateInvite(code: string) {
 }
 
 // ── Draft lifecycle ──────────────────────────────────────────────────────────
+// NOTE: this loads an organization at ANY status. It is named `loadDraft` for
+// historical reasons but it does not itself gate on status — `submitApplication`
+// and `seedChecklist` both need to read the row after it has flipped to
+// 'pending'. Every caller that must not touch a live org calls `assertDraft`.
 async function loadDraft(orgId: string): Promise<Organization> {
   const { data, error } = await supabase.from('organizations').select('*').eq('id', orgId).single()
   if (error || !data) throw err('Application not found', 404)
@@ -269,8 +273,24 @@ export async function uploadDocument(orgId: string, file: {
 }
 
 // ── Fetch (resume draft) ─────────────────────────────────────────────────────
+/**
+ * Resume an in-progress application.
+ *
+ * SECURITY: this endpoint is reachable with nothing but an org UUID, so it must
+ * only ever expose a DRAFT the applicant is still filling in. It previously
+ * loaded an organization at any status and returned its beneficial owners (name,
+ * DOB, nationality, ownership %), member emails and document records — meaning
+ * an org id was enough to read the KYB file of an approved, live member firm.
+ *
+ * Anything past 'draft' is now reported as 404 rather than 403/409: a status
+ * code that distinguishes "exists but not yours" from "does not exist" turns
+ * this into an existence oracle for member org ids, which is itself a leak on a
+ * platform whose premise is that counterparty identity is not public.
+ */
 export async function getApplication(orgId: string) {
   const org = await loadDraft(orgId)
+  if (org.status !== 'draft') throw err('Application not found', 404)
+
   const [{ data: owners }, { data: members }, { data: docs }] = await Promise.all([
     supabase.from('beneficial_owners').select('*').eq('org_id', orgId),
     supabase.from('members').select('*').eq('org_id', orgId),
