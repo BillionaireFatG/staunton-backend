@@ -175,10 +175,71 @@ export interface Conversation {
   participant_1: string
   participant_2: string
   last_message_at: string | null
+  /**
+   * The deal this thread belongs to, or null for a plain DM.
+   * Added by backend migration 0009 Part E — it did not exist before, which is
+   * why a negotiation could not be attached to the transaction it was about.
+   */
+  deal_id?: string | null
   /** Derived server-side: [participant_1, participant_2]. Not a column. */
   participants: string[]
   last_message?: Message
   unread_count?: number
+}
+
+/**
+ * The counterparty as shown in a conversation list.
+ *
+ * Deliberately NOT the full Profile: no email, no phone. A conversation index
+ * needs a name and a face; contact details are a separate disclosure decision.
+ */
+export interface ConversationCounterparty {
+  id: string
+  full_name: string | null
+  company_name: string | null
+  avatar_url: string | null
+}
+
+/**
+ * A row of GET /api/messages/conversations.
+ *
+ * Distinct from `Conversation` because it is a projection, not the table: it
+ * carries the genuine last message, the caller's per-conversation unread count
+ * and the counterparty, all resolved by the `conversation_list()` RPC in one
+ * call. The previous implementation returned a `last_message` that was actually
+ * the entire message history of every conversation (a PostgREST embed returns
+ * the whole child collection), so clients could not rely on it and had no unread
+ * count at all beyond the platform-wide total.
+ */
+export interface ConversationSummary {
+  id: string
+  created_at: string
+  participant_1: string
+  participant_2: string
+  participants: string[]
+  deal_id: string | null
+  last_message_at: string | null
+  /** Messages in THIS conversation, not sent by the caller, still unread. */
+  unread_count: number
+  /** Null if the counterparty's profile row has been deleted. */
+  counterparty: ConversationCounterparty | null
+  /** Null for a conversation with no messages yet. Genuinely the newest one. */
+  last_message: Pick<Message, 'id' | 'conversation_id' | 'content' | 'sender_id' | 'created_at'> | null
+}
+
+/**
+ * A line of the platform-wide chat room (`global_messages`).
+ *
+ * Separate from `Message`: the table has no conversation_id and no `read` flag —
+ * global chat has no per-user read state.
+ */
+export interface GlobalMessage {
+  id: string
+  sender_id: string
+  content: string
+  created_at: string
+  /** Embedded profile projection; no contact details. */
+  sender?: ConversationCounterparty | null
 }
 
 export interface Message {
