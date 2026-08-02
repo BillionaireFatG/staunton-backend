@@ -30,8 +30,26 @@ npm run dev              # tsx watch, http://localhost:3001
 | `npm run dev` | Dev server with reload (`tsx watch src/server.ts`) on **:3001** |
 | `npm run build` | Type-check and emit to `dist/` (`tsc`) |
 | `npm start` | Run the built server (`node dist/server.js`) |
+| `npm run seed:loyalty` | **Dev only.** Seed sample loyalty data — see below |
 
 `npm run build` must pass before anything ships.
+
+### Dev seed data
+
+`scripts/seed-loyalty.ts` puts one realistic `user_loyalty` row (gold tier) plus sample
+`loyalty_transactions` against an existing dev account, because those tables ship empty and
+`getUserLoyalty()` 404s without them — which makes every loyalty endpoint untestable.
+
+```bash
+npm run seed:loyalty                                    # default dev account
+SEED_USER_EMAIL=someone@example.com npm run seed:loyalty
+```
+
+It is idempotent (fixed row ids; re-run to reset `available_points` between redemption tests),
+additive (never drops or deletes), refuses to run with `NODE_ENV=production`, and labels every row
+it writes `[DEV SAMPLE]`. It also inserts one deliberately **inactive** reward so the missing
+`is_active` filter in `getRewards()` is visible rather than theoretical. `scripts/` is outside
+`tsconfig`'s `include`, so it is not part of `npm run build`.
 
 ### Environment variables
 
