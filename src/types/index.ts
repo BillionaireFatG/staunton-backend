@@ -143,10 +143,24 @@ export interface VoiceParticipant {
   is_speaking: boolean
 }
 
+/**
+ * Matches the DEPLOYED `conversations` table (Frontend migration 003).
+ *
+ * This previously declared `participant_ids: string[]`, which does not exist:
+ * the real table is a two-column pair, `participant_1` / `participant_2`, with
+ * `last_message_at` rather than `updated_at`. Every query in services/messages.ts
+ * targeted the imaginary shape, so the whole messaging domain returned PostgREST
+ * errors. `participants` is kept as a derived convenience field so clients have
+ * one thing to read regardless of which column a user landed in.
+ */
 export interface Conversation {
   id: string
   created_at: string
-  participant_ids: string[]
+  participant_1: string
+  participant_2: string
+  last_message_at: string | null
+  /** Derived server-side: [participant_1, participant_2]. Not a column. */
+  participants: string[]
   last_message?: Message
   unread_count?: number
 }
@@ -158,7 +172,8 @@ export interface Message {
   created_at: string
   sender_id: string
   content: string
-  is_read?: boolean
+  /** Deployed column is `read`, not `is_read`. */
+  read?: boolean
 }
 
 export interface NotificationPreferences {
