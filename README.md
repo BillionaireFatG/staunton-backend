@@ -30,7 +30,10 @@ npm run dev              # tsx watch, http://localhost:3001
 | `npm run dev` | Dev server with reload (`tsx watch src/server.ts`) on **:3001** |
 | `npm run build` | Type-check and emit to `dist/` (`tsc`) |
 | `npm start` | Run the built server (`node dist/server.js`) |
+| `npm test` | Run the test suite (`node:test` via `tsx`) — see below |
 | `npm run seed:loyalty` | **Dev only.** Seed sample loyalty data — see below |
+| `npm run verify:applications` | **Dev only.** Security regression harness for the public application funnel — see below |
+| `npm run verify:redemption` | **Dev only.** Security regression harness for loyalty redemption — see below |
 
 `npm run build` must pass before anything ships.
 
@@ -51,6 +54,32 @@ it writes `[DEV SAMPLE]`. It also inserts one deliberately **inactive** reward s
 `is_active` filter in `getRewards()` is visible rather than theoretical. `scripts/` is outside
 `tsconfig`'s `include`, so it is not part of `npm run build`.
 
+### Security regression harnesses
+
+Both drive the real code against the real dev database, because the properties they check
+(authorization holding in the write path, a route hook covering every route) cannot be demonstrated
+with mocks. Both refuse to run with `NODE_ENV=production` and clean up the rows they create.
+
+```bash
+npm run verify:applications   # public application funnel: draft-token authz + rate limiting
+npm run verify:redemption     # loyalty redemption: tier gate + atomic decrement
+```
+
+`verify:applications` covers the two application-funnel bugs — the draft-resume endpoint serving
+live member firms, and every `/:orgId` route trusting the path parameter as proof of ownership. 27
+checks: missing / tampered / garbage / expired / wrong-org tokens on the read path, nine `/:orgId`
+routes called without a token (eight writes plus `GET /:orgId/status`), that no rejected write took
+effect, that a correct token still resumes a draft, that a non-draft org yields no owner rows, and
+that `validate-invite` throttles.
+
+Gap worth knowing: `POST /:orgId/documents` is **not** in that loop, so the one multipart write is
+unproven. It is gated by the same `preHandler` hook as the others, which is keyed on the presence of
+an `:orgId` param rather than a route list, so it is covered by construction — but not by a test.
+
+`verify:redemption` needs `npm run seed:loyalty` first, and **fails until migration `0003` is
+applied** — redemption deliberately returns 503 rather than falling back to the read-then-write path
+that allowed double-spend.
+
 ### Environment variables
 
 All of these live in `.env` (git-ignored); `.env.example` is the tracked template.
@@ -62,10 +91,15 @@ All of these live in `.env` (git-ignored); `.env.example` is the tracked templat
 | `NODE_ENV` | no | `development` / `production` |
 | `SUPABASE_URL` | **yes** | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | **yes** | Service-role key. Bypasses RLS — never expose to clients |
-| `JWT_SECRET` | **yes** | Must match the Supabase JWT secret; used to validate client tokens |
+| `APPLICATION_TOKEN_SECRET` | **yes** | HMAC secret for public application draft tokens. ≥32 chars, unique per environment. The server refuses to sign or verify without it |
 | `ALLOWED_ORIGINS` | **yes** | Comma-separated CORS origins |
 | `APP_URL` | **yes** | Public app URL, used for approval setup / magic links |
+| `TRUST_PROXY` | no | Set **only** when a proxy in front of this server rewrites `X-Forwarded-For`. Controls `req.ip`, which keys rate limiting and the submission audit record. Trusting the header with no proxy present lets any caller spoof both |
 | `OPENSANCTIONS_API_KEY` | no | Sanctions/PEP screening. Without it, screening degrades to a pending "screen manually" check and never blocks submission |
+
+There is deliberately **no `JWT_SECRET`**. It used to be listed here as required, and nothing has
+ever read it: `src/middleware/auth.ts` passes the bearer token to Supabase `getUser()` and Supabase
+does the verification. Remove it from any deployment environment that still sets it.
 
 ---
 

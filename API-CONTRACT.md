@@ -201,17 +201,180 @@ All of them additionally return `409` if the application is no longer a draft (u
 
 ---
 
-## 2. Global rate limiting
+## 2. `/api/voice-rooms/*` — room authorization added, `VoiceRoom` shape corrected
 
-All routes are now behind a per-IP limit of **300 requests/minute**, with the tighter per-route
-limits listed above. `429` responses carry `code: "rate_limited"` and a `Retry-After` header.
+Being authenticated used to be the whole check: any logged-in user could read any room by id, read
+its full participant list, read its message history and post into it.
 
-The limit is per server process and held in memory, so it does not currently hold across a
-multi-instance deployment.
+**New behaviour**
+
+- `GET /api/voice-rooms` returns public rooms **plus** private rooms the caller has already joined.
+  It previously filtered on `is_active`, a column that does not exist, so it returned a 500.
+- `GET /:id`, `GET /:id/participants`, `GET /:id/messages`, `POST /:id/join` require access:
+  the room is public, or the caller already has a participant row. **No access returns `404`, not
+  `403`** — a 403 would confirm the room exists and let private rooms be enumerated.
+- Private rooms **cannot be self-joined**. `POST /:id/join` on a private room the caller is not
+  already in returns `404`. There is no invitation flow yet; this fails closed deliberately.
+- `POST /:id/messages` now requires the caller to have **joined** the room: `403 "Join the room
+  before posting a message"`. If your UI lets a user type into a room without joining, it must call
+  `POST /:id/join` first.
+- `PATCH /:id/status` accepts only `is_muted` and `is_speaking`, both booleans. Anything else is
+  rejected with a `400`. It previously wrote the raw body into the row, so `{"user_id": "..."}`
+  reassigned the participant row to another user.
+- `GET /:id/messages?limit=` **must be 1–100** — `?limit=101` is a `400`, not a silent clamp.
+  Default 50.
+
+**`VoiceRoom` type changed** (`src/types/index.ts`) to match the deployed table. It declared
+`topic`, `host_id` and `is_active` — none of which exist — and omitted every column that does:
+
+```ts
+{ id, created_at, name, category, emoji, description, is_public, agora_channel_name, participant_count? }
+```
+
+Known gap, not fixed: `agora_channel_name` is what clients hand to the Agora SDK, and this backend
+mints no Agora token, so whatever authorizes the actual audio session is client-side and outside
+these checks. A server-side Agora token service is the real fix.
+
+Still broken, unrelated to this change: `voice_room_messages` does not exist in the deployed
+database, so both message endpoints return 500 regardless.
 
 ---
 
-## 3. Environment
+## 3. `/api/messages/*` — unread count fixed, `Conversation`/`Message` shapes corrected
+
+`GET /api/messages/unread-count` counted every unread message **on the entire platform** that the
+caller had not sent. It now counts only messages in the caller's own conversations. Expect this
+number to drop.
+
+**`Conversation` and `Message` types changed** to match the deployed tables. The code assumed a
+`participant_ids: string[]` column and a `messages.is_read` flag; the real table is a pair and the
+flag is `read`. Every messaging endpoint was returning a PostgREST error before this.
+
+```ts
+Conversation { id, created_at, participant_1, participant_2, last_message_at, participants: string[], last_message?, unread_count? }
+Message      { id, conversation_id?, room_id?, created_at, sender_id, content, read? }
+```
+
+`participants` is derived server-side (`[participant_1, participant_2]`) so clients have one field
+to read. **If your code reads `conversation.participant_ids`, change it to `conversation.participants`.**
+**If your code reads `message.is_read`, change it to `message.read`.**
+
+Other changes:
+
+- `POST /conversations` validates `recipient_id`: must be a UUID, must be an existing profile
+  (`404 "Recipient not found"`), and must not be the caller (`400`).
+- Conversations are now idempotent in both directions — `getOrCreate(A,B)` and `getOrCreate(B,A)`
+  return the same row.
+- **Non-participants now get `404`, not `403`,** on `GET /conversations/:id`,
+  `POST /conversations/:id/messages` and `POST /conversations/:id/read`. Same enumeration-oracle
+  reasoning as above.
+- `GET /conversations/:id?limit=` **must be 1–100** (default 50) — out of range is a `400`, not a
+  silent clamp; `before` must be an ISO-8601 datetime with an offset.
+
+---
+
+## 4. `/api/profiles/*` — search bounded, projections corrected
+
+`GET /api/profiles/search?q=&limit=100000` returned the entire member directory.
+
+- **`q` is now required and must be at least 2 characters** (`400` otherwise). An empty `q` used to
+  match every member.
+- **`limit` must be 1–50** (default 20); `?limit=51` is a `400`. The client no longer chooses.
+- LIKE metacharacters in `q` are escaped, so `?q=%` and `?q=__` no longer match everything.
+- Search now also matches `company_name`, not just `full_name`.
+
+**Response projection changed** for `GET /search` and `GET /:id`. They selected `trust_score`,
+`is_verified` and `roles`, none of which exist on the deployed `profiles` table — both endpoints
+were returning 500. Now:
+
+```ts
+// GET /api/profiles/search
+{ id, full_name, company_name, avatar_url, verification_status, role }
+// GET /api/profiles/:id
+{ id, full_name, company_name, avatar_url, role, verification_status, bio }
+```
+
+`email`, `phone`, `location` and `is_admin` are deliberately **not** in either projection.
+
+`PATCH /api/profiles/me` now rejects unknown keys with a `400` instead of silently ignoring them.
+Accepted: `full_name`, `bio`, `avatar_url`, `company_name`, `phone`, `location`. **`roles` is no
+longer accepted** — there is no such column, and `role` is set by admin flows, not self-service.
+
+---
+
+## 5. `/api/notifications/preferences` — strict body validation
+
+`PUT /api/notifications/preferences` now parses its body against a strict schema instead of casting
+it. **Unknown keys are a `400`** rather than being silently ignored — notably `user_id`, which a
+client might send expecting it to select whose preferences are written. It never did; the caller's
+own id is always used.
+
+Accepted, all optional: `deal_updates`, `new_messages`, `price_alerts`, `weekly_digest`,
+`marketing`, `desktop`, `sound`, `do_not_disturb`, `quiet_hours_enabled` (booleans),
+`quiet_hours_start`, `quiet_hours_end` (strings, `HH:00`, on the hour only — `"09:30"` is a `400`).
+
+An empty body `{}` is still valid and is a no-op that ensures the defaults row exists.
+
+---
+
+## 6. Rate limiting — now two layers, and keyed per account
+
+Previously a single per-IP limit of 300/minute. Two things were wrong with that:
+
+- **A shared office IP was a shared bucket.** A trading firm's whole desk egresses from one
+  address, so one busy dashboard throttled everyone else at that firm.
+- **It could not protect authentication.** The limiter attaches as a route-level hook, which runs
+  *after* the `authenticate` hook. Every request had already cost a Supabase `getUser` round trip
+  before the limiter saw it, so spraying invalid bearer tokens was unthrottled where it mattered.
+
+**Now:**
+
+| Layer | Runs | Keyed on | Default |
+|---|---|---|---|
+| 1 — pre-auth gate | before `authenticate` | client IP | 600 / minute |
+| 2 — main limit | after `authenticate` | **account id**, falling back to IP when unauthenticated | 300 / minute |
+
+Per-route limits (all layer 2, so all per account where the route is authenticated):
+
+| Route | Limit |
+|---|---|
+| `POST /api/applications/validate-invite` | 10 / 10 min |
+| `POST /api/applications` | 5 / hour |
+| `POST /api/applications/:orgId/documents` | 20 / hour |
+| `POST /api/applications/:orgId/submit` | 10 / hour |
+| `GET /api/profiles/search` | 30 / min |
+| `GET /api/deals/counterparties/search` | 30 / min |
+
+`429` responses carry `code: "rate_limited"` and a `Retry-After` header, in the same body shape as
+every other error.
+
+**What this means for clients:** a logged-in user now gets their own budget rather than sharing one
+with their colleagues, so legitimate concurrent use is far less likely to 429. The flip side is that
+retrying with a different IP no longer resets anything. The two search endpoints are the tightest at
+30/minute — if a UI does search-as-you-type against either, debounce it.
+
+Both limits are per server process and held in memory, so neither holds across a multi-instance
+deployment. This needs a shared (Redis) store before the API runs on more than one node.
+
+---
+
+## 7. `Profile` type corrected — three fields removed
+
+`Profile` in `src/types/index.ts` declared `roles: string[]`, `is_verified: boolean` and
+`trust_score: number` as **required**. None of the three exists on the deployed `profiles` table —
+verified by querying the live database, not by reading migrations. Any client field typed against
+them compiled fine and was always `undefined`.
+
+They are gone. The singular `role` is the real column. `email`, `is_admin`, `updated_at` and
+`verified_at` are real and have been added, but note that `email` and `is_admin` are returned **only**
+by `GET /api/profiles/me` (the caller's own row) — never by `/search` or `/:id`.
+
+**If your code reads `profile.roles`, `profile.is_verified` or `profile.trust_score`, it has never
+had a value. Remove it, or render trust/verification from `verification_status`.**
+
+---
+
+## 8. Environment
 
 New backend env var, required — the server refuses to sign or verify a draft token without it:
 
@@ -219,5 +382,11 @@ New backend env var, required — the server refuses to sign or verify a draft t
 |---|---|
 | `APPLICATION_TOKEN_SECRET` | HMAC secret for application draft tokens. ≥32 chars, unique per environment. |
 | `TRUST_PROXY` | Optional. Set only when a proxy in front of this server rewrites `X-Forwarded-For`. Controls what `req.ip` resolves to for rate limiting and submission audit records. |
+
+**Removed:** `JWT_SECRET`. This service never verified tokens itself — `src/middleware/auth.ts`
+hands the bearer token to Supabase `getUser()` — so the variable was documented but unread. It has
+been deleted from `.env.example`; delete it from any deployment environment too. `@fastify/jwt` and
+`@fastify/websocket` have been removed from `package.json` for the same reason: both were installed,
+neither was used, and `@fastify/websocket` was registered with no handler behind it.
 
 No client-side env change.
