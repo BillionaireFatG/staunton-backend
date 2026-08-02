@@ -32,7 +32,15 @@ export function getTierProgress(points: number): { current: LoyaltyTier; next: L
   return { current, next, progress }
 }
 
-export async function getUserLoyalty(userId: string): Promise<LoyaltyState & { tier: LoyaltyTier; progress: ReturnType<typeof getTierProgress> }> {
+export async function getUserLoyalty(
+  userId: string,
+): Promise<
+  LoyaltyState & {
+    tier: LoyaltyTier
+    progress: ReturnType<typeof getTierProgress>
+    points_redeemed: number
+  }
+> {
   const { data, error } = await supabase
     .from('user_loyalty')
     .select('*')
@@ -45,7 +53,8 @@ export async function getUserLoyalty(userId: string): Promise<LoyaltyState & { t
   // so redeeming (which only reduces available_points) never lowers a tier.
   const tier = getTier(data.lifetime_points)
   const progress = getTierProgress(data.lifetime_points)
-  return { ...data, tier, progress }
+  const points_redeemed = await getPointsRedeemed(userId)
+  return { ...data, tier, progress, points_redeemed }
 }
 
 export async function getLoyaltyTransactions(userId: string): Promise<LoyaltyTransaction[]> {
@@ -68,37 +77,110 @@ export async function getRewards(tier: LoyaltyTier): Promise<Reward[]> {
     .from('rewards')
     .select('*')
     .in('tier_required', eligibleTiers)
+    // Retired rewards must never be offered. This filter was missing, so
+    // deactivated rewards were still listed (and were redeemable).
+    .eq('is_active', true)
+    // Deterministic ordering — results were previously in arbitrary DB order.
+    .order('points_cost', { ascending: true })
+    .order('id', { ascending: true })
 
   if (error) throw new Error(error.message)
   return data ?? []
 }
 
-export async function redeemReward(userId: string, rewardId: string): Promise<void> {
-  const loyalty = await getUserLoyalty(userId)
+export interface RedemptionResult {
+  redemption_id: string
+  points_spent: number
+  available_points: number
+}
 
-  const { data: reward, error: rewardError } = await supabase
-    .from('rewards')
-    .select('*')
-    .eq('id', rewardId)
-    .single()
-
-  if (rewardError || !reward) throw Object.assign(new Error('Reward not found'), { statusCode: 404 })
-  if (loyalty.available_points < reward.points_cost) throw Object.assign(new Error('Insufficient points'), { statusCode: 400 })
-
-  const { error } = await supabase.from('reward_redemptions').insert({
-    user_id: userId,
-    reward_id: rewardId,
-    points_spent: reward.points_cost,
-    status: 'pending',
+/**
+ * Redeem a reward.
+ *
+ * This delegates entirely to the `redeem_reward` Postgres function (see
+ * migrations/0003_redeem_reward_atomic.sql). That is deliberate and must stay
+ * that way: the tier gate and the balance decrement have to be evaluated under
+ * a row lock inside one transaction. The previous implementation did the checks
+ * here in application code and was exploitable two ways —
+ *
+ *   - it never checked `tier_required`, so a gold user could redeem a
+ *     platinum-only reward by POSTing straight to the redeem endpoint; and
+ *   - it read the balance and then wrote (balance - cost), so six concurrent
+ *     requests each read 8500 and each granted a 3000pt reward while the
+ *     balance fell by only 3000.
+ *
+ * Do NOT reintroduce a read-then-write fallback here. If the function is
+ * missing, this fails closed (503) rather than silently reopening the hole.
+ */
+export async function redeemReward(userId: string, rewardId: string): Promise<RedemptionResult> {
+  const { data, error } = await supabase.rpc('redeem_reward', {
+    p_user_id: userId,
+    p_reward_id: rewardId,
   })
 
-  if (error) throw new Error(error.message)
+  if (error) {
+    // PGRST202 = function not found in the schema cache: migration 0003 has not
+    // been applied. Fail closed and say so plainly.
+    if (error.code === 'PGRST202') {
+      throw Object.assign(
+        new Error(
+          'Redemption is unavailable: the redeem_reward database function is missing. ' +
+            'Apply migrations/0003_redeem_reward_atomic.sql.',
+        ),
+        { statusCode: 503 },
+      )
+    }
+    throw new Error(error.message)
+  }
 
-  // Spend from the redeemable balance only; lifetime_points (tier) is untouched.
-  await supabase
-    .from('user_loyalty')
-    .update({ available_points: loyalty.available_points - reward.points_cost })
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) throw new Error('redeem_reward returned no result')
+
+  switch (row.status) {
+    case 'ok':
+      return {
+        redemption_id: row.redemption_id,
+        points_spent: row.points_spent,
+        available_points: row.available_points,
+      }
+    case 'reward_not_found':
+      throw Object.assign(new Error('Reward not found'), { statusCode: 404 })
+    case 'loyalty_not_found':
+      throw Object.assign(new Error('Loyalty record not found'), { statusCode: 404 })
+    case 'reward_inactive':
+      throw Object.assign(new Error('This reward is no longer available'), { statusCode: 409 })
+    case 'reward_expired':
+      throw Object.assign(new Error('This reward has expired'), { statusCode: 409 })
+    case 'out_of_stock':
+      throw Object.assign(new Error('This reward is out of stock'), { statusCode: 409 })
+    case 'tier_too_low':
+      throw Object.assign(
+        new Error(`This reward requires ${row.required_tier} tier; your tier is ${row.user_tier}`),
+        { statusCode: 403 },
+      )
+    case 'insufficient_points':
+      throw Object.assign(new Error('Insufficient points'), { statusCode: 400 })
+    default:
+      throw new Error(`Unexpected redemption status: ${row.status}`)
+  }
+}
+
+/**
+ * Total points the user has ever spent on rewards.
+ *
+ * Clients were deriving this as `lifetime_points - available_points`, which is
+ * wrong: lifetime_points only ever counts points EARNED, and any adjustment
+ * that moves available_points without a redemption (expiry, manual correction)
+ * makes that subtraction drift. The redemption ledger is the real source.
+ */
+export async function getPointsRedeemed(userId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from('reward_redemptions')
+    .select('points_spent')
     .eq('user_id', userId)
+
+  if (error) throw new Error(error.message)
+  return (data ?? []).reduce((sum, r) => sum + (r.points_spent ?? 0), 0)
 }
 
 export async function getAchievements(userId: string): Promise<{ all: Achievement[]; earned: string[] }> {
