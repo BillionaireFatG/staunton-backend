@@ -6,6 +6,7 @@
 // auth-user provisioning via the Supabase Admin API.
 // ============================================================================
 
+import { randomBytes } from 'crypto'
 import { z } from 'zod'
 import { supabase } from '../lib/supabase'
 import { actingMemberId } from '../middleware/requireAdmin'
@@ -201,11 +202,43 @@ const inviteSchema = z.object({
   expires_in_days: z.number().int().min(1).max(90).optional(),
 })
 
+/**
+ * Human-typable single-use invite code, e.g. STN-7F3K-9QXM.
+ *
+ * An invite code is a bearer credential: presenting a valid one at
+ * /api/applications/validate-invite skips the public queue and puts the holder
+ * in the `invited` lane. It must therefore be unguessable.
+ *
+ * It was generated with `Math.random()`. That is a fast non-cryptographic PRNG
+ * (V8 uses xorshift128+) whose internal state can be recovered from a modest run
+ * of observed outputs, after which every past and future code is derivable. Codes
+ * are also handed to outsiders by design, so an attacker gets samples for free
+ * just by being invited once — and the endpoint that tests a code was, until
+ * this pass, unauthenticated and unthrottled.
+ *
+ * `randomBytes` instead, with rejection sampling: taking `byte % 31` over a
+ * 31-character alphabet would bias the first 8 characters (256 = 8*31 + 8), and
+ * bias shrinks the effective keyspace. Values in the non-uniform tail are
+ * discarded and redrawn.
+ *
+ * Keyspace is unchanged at 31^8 ≈ 8.5e11.
+ */
 function makeCode(): string {
-  // Human-typable single-use code, e.g. STN-7F3K-9Qximport.
-  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-  const rand = (n: number) =>
-    Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' // 31 chars; no I/L/O/0/1
+  const limit = 256 - (256 % alphabet.length) // 248 — reject bytes at or above
+
+  const rand = (n: number) => {
+    let out = ''
+    while (out.length < n) {
+      for (const byte of randomBytes(n * 2)) {
+        if (byte >= limit) continue // discard, would bias the distribution
+        out += alphabet[byte % alphabet.length]
+        if (out.length === n) break
+      }
+    }
+    return out
+  }
+
   return `STN-${rand(4)}-${rand(4)}`
 }
 
