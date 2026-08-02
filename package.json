@@ -10,7 +10,8 @@
     "test": "tsx --test \"tests/**/*.test.ts\"",
     "seed:loyalty": "tsx scripts/seed-loyalty.ts",
     "verify:redemption": "tsx scripts/verify-redemption.ts",
-    "verify:applications": "tsx scripts/verify-applications-authz.ts"
+    "verify:applications": "tsx scripts/verify-applications-authz.ts",
+    "verify:messaging": "tsx scripts/verify-messaging-authz.ts"
   },
   "keywords": [],
   "author": "",
