@@ -95,6 +95,21 @@ async function rest(
   return { status: res.status, body }
 }
 
+/**
+ * ⚠️ 42501 IS NOT 42703, AND CONFLATING THEM PRODUCES A FALSE ALL-CLEAR.
+ *
+ *   42501 permission denied  — the access control worked. This is the finding.
+ *   42703 undefined_column   — you asked for a column that does not exist. This
+ *                              says NOTHING about permissions.
+ *
+ * This bit people twice on this project. A probe asked anon for `user_id` on
+ * global_messages, got an error, and the table was recorded as "blocked" — but
+ * global_messages has no `user_id` column, so the error was a typo being
+ * reported back, and anon could read every message body the whole time.
+ *
+ * So 42703 is deliberately NOT in this list, and is called out separately as a
+ * broken probe rather than being allowed to look like a denial.
+ */
 const isDenied = (r: { status: number; body: any }) =>
   r.status === 401 ||
   r.status === 403 ||
@@ -102,6 +117,10 @@ const isDenied = (r: { status: number; body: any }) =>
   r.body?.code === 'PGRST202' ||
   r.body?.code === 'PGRST301' ||
   /permission denied/i.test(String(r.body?.message ?? ''))
+
+/** A malformed probe, which must never be mistaken for a security result. */
+const isBadProbe = (r: { status: number; body: any }) =>
+  r.body?.code === '42703' || r.body?.code === 'PGRST204'
 
 const describe = (r: { status: number; body: any }) =>
   `${r.status} ${r.body?.code ?? ''} ${String(r.body?.message ?? JSON.stringify(r.body ?? '')).slice(0, 110)}`
@@ -135,6 +154,18 @@ function expectLegit(label: string, ok: boolean, detail: string) {
   else fail(`[BROKE SOMETHING LEGITIMATE] ${label} -> ${detail}`)
 }
 
+const check = (ok: boolean, m: string, detail = '') =>
+  ok ? pass(m) : fail(`${m}${detail ? ` -> ${detail}` : ''}`)
+
+/**
+ * The live column set per table, read from the PostgREST OpenAPI document.
+ *
+ * Populated once by detectApplied() and used to drive the per-column anon
+ * probes, so no probe can ask for a column that does not exist. Guessing column
+ * names is how a 42703 gets misread as a denial.
+ */
+const liveColumns: Record<string, Record<string, unknown>> = {}
+
 // ── Is 0009 applied? ────────────────────────────────────────────────────────
 // Asked of the database, not of a file or a changelog. Two independent markers
 // so a partial application is visible rather than rounded to "applied".
@@ -142,6 +173,10 @@ async function detectApplied(): Promise<boolean> {
   const spec: any = await fetch(`${URL_}/rest/v1/`, {
     headers: { apikey: SERVICE!, Authorization: `Bearer ${SERVICE}`, Accept: 'application/openapi+json' },
   }).then((r) => r.json())
+
+  for (const [table, def] of Object.entries<any>(spec?.definitions ?? {})) {
+    liveColumns[table] = def?.properties ?? {}
+  }
 
   const hasDealId = Boolean(spec?.definitions?.conversations?.properties?.deal_id)
   const hasRpc = Object.keys(spec?.paths ?? {}).includes('/rpc/conversation_list')
@@ -326,27 +361,62 @@ async function main() {
       .insert({ sender_id: alice.id, content: 'verify-messaging canary' })
     if (gErr) console.log(`  WARN  could not seed global_messages canary: ${gErr.message}`)
 
+    // Probed PER COLUMN, not just `select=*`.
+    //
+    // A table-wide probe answers "can anon reach this table". The question that
+    // actually matters is "which FIELDS are exposed" — reading `content` is the
+    // breach; reading `created_at` is close to harmless. Column-level grants can
+    // also differ from table-level ones, so `select=*` can be denied while an
+    // individual column is readable.
+    //
+    // Column names come from the live OpenAPI document rather than from this
+    // file, so a probe cannot ask for a column that does not exist and misread
+    // the resulting 42703 as a denial. That is precisely the false all-clear
+    // this project has already hit.
     for (const table of ['global_messages', 'voice_rooms', 'messages', 'conversations', 'voice_participants']) {
-      const r = await rest(`${table}?select=*&limit=3`, ANON!)
-      const rows = Array.isArray(r.body) ? r.body.length : 0
+      const cols = Object.keys(liveColumns[table] ?? {})
+      if (cols.length === 0) {
+        console.log(`  INFO  ${table}: not exposed in the live schema, skipped`)
+        continue
+      }
+
+      const readable: string[] = []
+      const denied: string[] = []
+
+      for (const col of cols) {
+        const r = await rest(`${table}?select=${col}&limit=3`, ANON!)
+
+        if (isBadProbe(r)) {
+          // Impossible by construction (names came from the live schema), so if
+          // it happens the probe is broken and must not be scored either way.
+          fail(`[BROKEN PROBE] ${table}.${col} -> ${describe(r)} — 42703 is not a permission result`)
+          continue
+        }
+        if (isDenied(r)) {
+          denied.push(col)
+          continue
+        }
+        const rows = Array.isArray(r.body) ? r.body.length : 0
+        if (rows > 0) readable.push(col)
+      }
+
       if (applied) {
-        expectExploit(`anon reads ${table}`, r, true)
-      } else if (rows > 0) {
-        pass(`[reproduced, as expected pre-0009] anon reads ${table} -> ${rows} row(s) returned`)
+        check(
+          readable.length === 0,
+          `anon cannot read ANY column of ${table} (${denied.length}/${cols.length} explicitly denied)`,
+          readable.length ? `still readable: ${readable.join(', ')}` : '',
+        )
+      } else if (readable.length > 0) {
+        const sharp = readable.filter((c) => ['content', 'agora_channel_name'].includes(c))
+        pass(
+          `[reproduced, as expected pre-0009] anon reads ${table} columns: ${readable.join(', ')}` +
+            (sharp.length ? `   <-- includes ${sharp.join(', ')}` : ''),
+        )
       } else {
-        // 200 with [] is ambiguous: RLS-filtered, or simply an empty table.
-        // Reported as information, never as a pass.
-        console.log(`  INFO  anon reaches ${table}, 0 rows visible (RLS-filtered or empty) -> ${describe(r)}`)
+        // 0 rows is ambiguous: RLS-filtered, or an empty table. Never a pass.
+        console.log(`  INFO  anon reaches ${table}, 0 rows visible (RLS-filtered or empty)`)
       }
     }
-
-    // agora_channel_name is the sharpest part of F-8: this backend mints no
-    // Agora token, so the channel name is the closest thing to a join credential
-    // that exists.
-    const rooms = await rest('voice_rooms?select=agora_channel_name&limit=1', ANON!)
-    if (applied) expectExploit('anon reads voice_rooms.agora_channel_name (join credential)', rooms, true)
-    else if (Array.isArray(rooms.body) && rooms.body.length > 0)
-      pass(`[reproduced, as expected pre-0009] anon reads agora_channel_name -> ${JSON.stringify(rooms.body[0])}`)
 
     // ── F-16 / Part G: SECURITY DEFINER functions with a user_id argument ────
     console.log('\n=== SECURITY DEFINER FUNCTIONS TAKING A CALLER-SUPPLIED user_id ===')
