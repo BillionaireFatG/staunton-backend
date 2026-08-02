@@ -87,11 +87,24 @@ end $$;
 -- (inspections, storage credits, vessel charter), so this is revenue leakage.
 --
 -- Redemption must go through the backend: POST /api/loyalty/rewards/:id/redeem
-revoke insert on public.reward_redemptions from anon, authenticated;
-
--- Drop the permissive policy outright so intent is unambiguous even if grants
--- are later restored by a default-privileges change.
-drop policy if exists "Users can redeem rewards" on public.reward_redemptions;
+--
+-- NOTE ON GUARDS: `REVOKE` has no IF EXISTS form, and `DROP POLICY IF EXISTS`
+-- still requires the TABLE to exist. Both raise 42P01 on a missing object and
+-- abort the whole script. Every such statement in this file is therefore wrapped
+-- in a to_regclass() check so the migration applies cleanly against a database
+-- that is missing some optional tables — which this one is.
+do $$
+begin
+  if to_regclass('public.reward_redemptions') is not null then
+    execute 'revoke insert on public.reward_redemptions from anon, authenticated';
+    -- Drop the permissive policy outright so intent is unambiguous even if
+    -- grants are later restored by a default-privileges change.
+    execute 'drop policy if exists "Users can redeem rewards" on public.reward_redemptions';
+    raise notice 'reward_redemptions: client INSERT revoked, permissive policy dropped';
+  else
+    raise warning 'reward_redemptions NOT FOUND — free-redemption hole NOT closed. Investigate.';
+  end if;
+end $$;
 
 
 -- ── F-12 (CRITICAL): backup table with real deal data and NO RLS ────────────
@@ -112,11 +125,24 @@ drop table if exists public.deals_backup_20260421;
 -- reasoning that "clients don't have direct access." They do — the anon key is
 -- in the browser bundle. Enable RLS and revoke; the backend (service_role)
 -- bypasses RLS and continues to work unchanged.
-alter table if exists public.notification_preferences enable row level security;
-revoke all on public.notification_preferences from anon, authenticated;
-
 -- Deliberately NO policy is created: with RLS on and no policy, all non-service
 -- roles are denied. The backend is the only intended accessor.
+--
+-- This table may legitimately be absent: migrations/0001 was never applied to
+-- some environments. It is also worth checking whether it exists in a NON-public
+-- schema — PostgREST reported it present while `public.notification_preferences`
+-- did not resolve, which is the signature of a table living in another exposed
+-- schema. If so it is still client-reachable and still needs this treatment.
+do $$
+begin
+  if to_regclass('public.notification_preferences') is not null then
+    execute 'alter table public.notification_preferences enable row level security';
+    execute 'revoke all on public.notification_preferences from anon, authenticated';
+    raise notice 'notification_preferences: RLS enabled, client grants revoked';
+  else
+    raise warning 'public.notification_preferences NOT FOUND — skipped. If PostgREST can still reach a table by this name it lives in another schema and is UNPROTECTED; run the schema diagnostic.';
+  end if;
+end $$;
 
 
 -- ── F-14 (CRITICAL): admin_application_queue view bypasses RLS ──────────────
@@ -125,20 +151,24 @@ revoke all on public.notification_preferences from anon, authenticated;
 -- security_invoker. A view runs with its OWNER's privileges, so it bypasses RLS
 -- on every underlying table — exposing every applicant firm's legal name,
 -- jurisdiction, status, blacklist_flag and screening_flag.
-revoke all on public.admin_application_queue from anon, authenticated;
-
--- Belt and braces: on PG15+ make the view honour the *caller's* RLS, so even if
--- grants are restored the underlying policies still apply.
+-- Belt and braces: on PG15+ also make the view honour the *caller's* RLS, so
+-- even if grants are restored the underlying policies still apply.
 do $$
 begin
+  if to_regclass('public.admin_application_queue') is null then
+    raise warning 'admin_application_queue NOT FOUND — skipped';
+    return;
+  end if;
+
+  execute 'revoke all on public.admin_application_queue from anon, authenticated';
+  raise notice 'admin_application_queue: client grants revoked';
+
   if current_setting('server_version_num')::int >= 150000 then
     execute 'alter view public.admin_application_queue set (security_invoker = on)';
     raise notice 'admin_application_queue: security_invoker enabled';
   else
     raise notice 'PG < 15: security_invoker unavailable; relying on REVOKE only';
   end if;
-exception when undefined_table then
-  raise notice 'admin_application_queue not present; skipped';
 end $$;
 
 
@@ -174,10 +204,11 @@ end $$;
 
 -- Close the INSERT hole that made the promotion precondition self-satisfiable:
 -- a client may still declare capacity, but never mark it verified.
-drop policy if exists capacity_insert on public.financial_capacity;
 do $$
 begin
   if to_regclass('public.financial_capacity') is not null then
+    -- DROP POLICY IF EXISTS still needs the TABLE to exist, so it lives in here.
+    execute 'drop policy if exists capacity_insert on public.financial_capacity';
     execute $p$
       create policy capacity_insert on public.financial_capacity
         for insert to authenticated
