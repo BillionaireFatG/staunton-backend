@@ -273,6 +273,19 @@ Other changes:
 
 ### New in this pass — requires migration `0009` to be applied
 
+> **Verification status — read before building on this.**
+> Everything in this subsection is the **intended contract, derived from the migration and the
+> service code. None of it has been observed running.** `0009` is not applied, so the endpoints
+> below have never executed successfully against a live database — the deal-thread endpoint needs
+> `conversations.deal_id`, which does not exist yet, and the global-chat endpoints are new.
+>
+> What *is* verified, by exploit rather than by reading: the **pre**-`0009` state. With two real
+> user tokens, one participant rewrote the other's message and reattributed it to himself, and the
+> browser publishable key read `global_messages.content` and `voice_rooms.agora_channel_name`.
+>
+> So: the holes are confirmed, the fixes are not. Check each field below against a real response
+> before you depend on it, and report anything that disagrees — the contract is wrong, not you.
+
 **⚠️ Until `migrations/0009_messaging_authz_hardening.sql` is applied, `GET /api/messages/conversations`
 returns `503` with a message naming that migration.** It is not a code defect; the handler calls an
 RPC the migration creates. Previously this surfaced as an opaque `500`.
@@ -448,6 +461,11 @@ had a value. Remove it, or render trust/verification from `verification_status`.
 
 Foundation only. **There is no payment provider**; Stripe is an unmade commercial decision. Nothing
 here charges anyone.
+
+> **Verification status.** `0011` is not applied, so **none of this has ever run.** The shapes below
+> are the intended contract, derived from the migration and the service code. `npm run verify:subscriptions`
+> asserts them against the live database once applied — including the fail-closed resolution and the
+> concurrency behaviour — and until that has been run, treat this section as a design document.
 
 **Expect `POST /me` to return `409 plan_inactive` for every seeded plan.** That is the designed
 behaviour, not a defect: no plan is sellable until real pricing is set, and a database `CHECK`
