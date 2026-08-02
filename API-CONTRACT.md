@@ -271,6 +271,68 @@ Other changes:
 - `GET /conversations/:id?limit=` **must be 1–100** (default 50) — out of range is a `400`, not a
   silent clamp; `before` must be an ISO-8601 datetime with an offset.
 
+### New in this pass — requires migration `0009` to be applied
+
+**⚠️ Until `migrations/0009_messaging_authz_hardening.sql` is applied, `GET /api/messages/conversations`
+returns `503` with a message naming that migration.** It is not a code defect; the handler calls an
+RPC the migration creates. Previously this surfaced as an opaque `500`.
+
+**`GET /api/messages/conversations` no longer returns an unbounded embed.** The old `last_message`
+field was a PostgREST embed, which returns the *entire* child collection — so the response carried
+every message of every conversation on each render of the inbox. It is now genuinely the last
+message, or `null`.
+
+**If you are reducing `last_message` to the newest element client-side, delete that workaround once
+0009 is applied.** The field is a single object or `null`.
+
+```ts
+ConversationSummary {
+  id, participant_1, participant_2, participants: string[],
+  deal_id: string | null,
+  last_message_at, created_at,
+  unread_count: number,                 // per-conversation, for unread pills
+  counterparty: { id, full_name, company_name, avatar_url } | null,
+  last_message: { id, conversation_id, content, sender_id, created_at } | null
+}
+```
+
+`counterparty` is `null` when that profile row has been deleted — handle it rather than assuming it
+is present. It deliberately carries **no contact details**: a conversation list needs a name and a
+face, not an email or a phone number.
+
+| Method | Path | Body / Query | Returns |
+|---|---|---|---|
+| `GET` | `/api/messages/global` | `?limit=1..100` (default 50), `?before=` ISO-8601 | `GlobalMessage[]`, oldest-first |
+| `POST` | `/api/messages/global` | `{ content }` 1–4000 chars, strict | `201` `GlobalMessage` |
+| `GET` | `/api/messages/deals/:dealId/conversation` | — | `Conversation` |
+| `POST` | `/api/messages/deals/:dealId/conversation` | — | `201` `Conversation` |
+
+**Global chat had no backend at all** — the browser talked to `global_messages` directly, which
+breaks the three-layer rule, and that table's RLS policy was `USING (true)` with no role list.
+Confirmed live: the browser-shipped anon key returned real global chat rows on an invite-only
+platform. These endpoints are the supported path; `sender_id` is always the caller's id from the
+validated JWT and is never read from the body.
+
+`GlobalMessage { id, sender_id, content, created_at, sender: { id, full_name, company_name, avatar_url } | null }`
+
+**Per-deal threads** attach a negotiation to the transaction it is about. Authorized against the deal
+via the same predicate as `GET /api/deals/:id`, so a non-party gets `404` (not `403`) and the endpoint
+is not an existence oracle for deal ids. `GET` and `POST` are the same find-or-create operation and
+return the same body.
+
+Two deliberate `409`s: a deal with no counterparty, and a deal with **more than one** counterparty
+(buyer + seller + broker). The deployed `conversations` table is a two-column pair and cannot
+represent a three-way thread; picking one party silently would produce a negotiation record missing a
+participant, which is worse than no thread. Multi-party deal threads need a participants table.
+
+**`voice_room_messages` column disagreement — resolved.** The backend used `sender_id`, the frontend
+used `user_id`, and migration `008` declared `user_id`. **Neither has ever worked: the table does not
+exist in the live database at all** (verified via PostgREST — `008` was never applied), so both
+`GET/POST /api/voice-rooms/:id/messages` and the frontend's direct-Supabase equivalent have been
+failing since they were written. `0009` creates it with **`sender_id`**, matching `messages` and
+`global_messages` so all three chat surfaces share one shape. It is backend-only (RLS on, no policies,
+all client grants revoked), so clients must go through the API.
+
 ---
 
 ## 4. `/api/profiles/*` — search bounded, projections corrected
@@ -374,7 +436,68 @@ had a value. Remove it, or render trust/verification from `verification_status`.
 
 ---
 
-## 8. Environment
+## 8. `/api/subscriptions/*` — NEW (requires migration `0011`)
+
+Foundation only. **There is no payment provider**; Stripe is an unmade commercial decision. Nothing
+here charges anyone.
+
+**Expect `POST /me` to return `409 plan_inactive` for every seeded plan.** That is the designed
+behaviour, not a defect: no plan is sellable until real pricing is set, and a database `CHECK`
+constraint enforces that an active plan has a real, non-placeholder price.
+
+**Prices are `null`, not placeholder numbers.** Branch on `pricing_status`, never on the number. A
+fabricated price is the one figure that must not reach a trading desk.
+
+All routes require a JWT. **No route accepts an `org_id`** — the org is resolved server-side from the
+caller's member row, the same rule `/api/access/permissions/check` follows.
+
+| Method | Path | Body / Query | Returns |
+|---|---|---|---|
+| `GET` | `/api/subscriptions/plans` | — | `SubscriptionPlan[]` |
+| `GET` | `/api/subscriptions/me` | — | `OrgSubscription` (incl. resolved `entitlements`) |
+| `GET` | `/api/subscriptions/entitlements` | — | `{ entitlements }` |
+| `GET` | `/api/subscriptions/me/events` | `?limit=1..100` | audit rows; **admin only** |
+| `POST` | `/api/subscriptions/me` | `{ plan_key, status?, reason? }` strict; `status` is `active` or `trialing` | `OrgSubscription` |
+| `POST` | `/api/subscriptions/me/cancel` | `{ reason? }` strict | `OrgSubscription` |
+
+```ts
+SubscriptionPlan {
+  id, key, name, description: string | null,
+  price: number | null,            // null until real pricing is set. Never 0, never a guess.
+  currency, interval,
+  pricing_status: 'set' | 'not_set',
+  is_active: boolean,              // sellable
+  is_base: boolean,                // the fail-closed floor
+  sort_order: number
+}
+
+OrgSubscription {
+  org_id, plan_key, plan_name,
+  status: 'none' | 'trialing' | 'active' | 'past_due' | 'canceled' | 'expired',
+  is_granting: boolean,            // gate features on THIS, not on the status string
+  started_at, current_period_end, canceled_at,
+  entitlements: Record<string, { type, value, source: 'base' | 'plan' }>
+}
+```
+
+A firm that has never had a subscription returns `status: 'none'` with the base plan and base
+entitlements — **not a `404`** — so clients render one shape.
+
+**Entitlements are not permissions.** `has_permission` answers *what is your role*; entitlements
+answer *what did your firm pay for*. They fail in opposite directions and neither is a proxy for the
+other — check both where both apply.
+
+**Reading entitlements fails closed.** No subscription, or any non-granting status (including
+`past_due`), resolves to the base floor. An **absent key means not entitled**; unlimited is the
+explicit value `{ "type": "limit", "value": null }`. Do not treat a missing key as permissive.
+
+Ordinary members see only sellable plans from `GET /plans`; org and platform admins also see
+unreleased ones. Changing a subscription requires an **org admin or platform admin** — `403`
+otherwise. `409 concurrent_modification` means someone changed it at the same time: re-read and retry.
+
+---
+
+## 9. Environment
 
 New backend env var, required — the server refuses to sign or verify a draft token without it:
 
