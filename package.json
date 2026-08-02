@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "seed:loyalty": "tsx scripts/seed-loyalty.ts",
-    "verify:redemption": "tsx scripts/verify-redemption.ts"
+    "verify:redemption": "tsx scripts/verify-redemption.ts",
+    "verify:applications": "tsx scripts/verify-applications-authz.ts"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +19,7 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.1.0",
     "@fastify/multipart": "^10.0.0",
+    "@fastify/rate-limit": "^11.2.0",
     "@fastify/websocket": "^11.2.0",
     "@supabase/supabase-js": "^2.108.2",
     "dotenv": "^17.4.2",

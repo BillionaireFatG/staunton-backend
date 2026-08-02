@@ -9,6 +9,7 @@
 import { randomUUID } from 'crypto'
 import { z } from 'zod'
 import { supabase } from '../lib/supabase'
+import { issueDraftToken } from '../lib/draftToken'
 import { screenApplication, checkBlacklistReentry } from './screening'
 import type { Organization } from '../types/vetting'
 
@@ -165,7 +166,14 @@ export async function startApplication(bodyIn: unknown) {
   })
   if (memErr) throw new Error(memErr.message)
 
-  return { orgId: org.id as string, lane }
+  // The capability token for this draft. This is the ONLY point at which a
+  // token is minted — there is deliberately no "get me a token for org X"
+  // endpoint, because anything reachable with just an org id is the IDOR this
+  // is closing. The client must keep it; it is required by every subsequent
+  // /:orgId call and cannot be reissued.
+  const { token, expiresAt } = issueDraftToken(org.id as string)
+
+  return { orgId: org.id as string, lane, token, expiresAt }
 }
 
 export async function saveCompany(orgId: string, bodyIn: unknown) {
@@ -297,6 +305,27 @@ export async function getApplication(orgId: string) {
     supabase.from('application_documents').select('*').eq('org_id', orgId),
   ])
   return { org, owners: owners ?? [], members: members ?? [], documents: docs ?? [] }
+}
+
+/**
+ * Status-only view, available at any status.
+ *
+ * `getApplication` is draft-only, which would otherwise leave an applicant who
+ * has just submitted with no way to see what happened to their application.
+ * This is the replacement: it is token-gated like everything else under
+ * /:orgId, and it returns a deliberately minimal projection — no beneficial
+ * owners, no member emails, no documents. Widening this projection re-opens the
+ * leak that commit dbb3723 closed, so don't.
+ */
+export async function getApplicationStatus(orgId: string) {
+  const org = await loadDraft(orgId)
+  return {
+    orgId: org.id,
+    legal_name: org.legal_name,
+    status: org.status,
+    lane: org.lane,
+    submitted_at: (org as { attestation?: { at?: string } }).attestation?.at ?? null,
+  }
 }
 
 // ── Submit ───────────────────────────────────────────────────────────────────

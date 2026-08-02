@@ -56,9 +56,15 @@ export function errorHandler(error: FastifyError, req: FastifyRequest, reply: Fa
   }
 
   req.log.info({ err: error, url: req.url }, 'request rejected')
+
+  // A 4xx may carry a stable machine-readable `code` so clients can branch on
+  // the reason without string-matching `message` (which is prose and will
+  // change). Only ever exposed on 4xx: a 5xx must stay opaque.
+  const code = (error as FastifyError & { code?: string }).code
   return reply.status(statusCode).send({
     statusCode,
     error: STATUS_NAMES[statusCode] ?? error.name ?? 'Error',
     message: error.message ?? 'Request could not be processed',
+    ...(typeof code === 'string' && code ? { code } : {}),
   })
 }
