@@ -597,6 +597,15 @@ create index if not exists idx_global_messages_created_desc
 --
 -- Deliberately NOT returned: profiles.email or phone. A conversation list needs
 -- a name and a face, not contact details.
+-- Dropped first, not merely CREATE OR REPLACE'd. Postgres refuses to replace a
+-- function whose RETURNS TABLE signature changed ("cannot change return type of
+-- existing function"), and this signature has changed once already (deal_reference
+-- was added). Without the drop, re-running this file against a database that got
+-- an earlier version would fail partway through and leave the security fixes in
+-- Parts A–F applied but this function stale — the worst outcome, because the API
+-- would keep working against an out-of-date shape.
+drop function if exists public.conversation_list(uuid, int);
+
 create or replace function public.conversation_list(
   p_user  uuid,
   p_limit int default 50
@@ -606,6 +615,7 @@ returns table (
   participant_1           uuid,
   participant_2           uuid,
   deal_id                 uuid,
+  deal_reference          text,
   last_message_at         timestamptz,
   created_at              timestamptz,
   counterparty_id         uuid,
@@ -652,6 +662,7 @@ as $$
          mine.participant_1,
          mine.participant_2,
          mine.deal_id,
+         d.reference_number,
          mine.last_message_at,
          mine.created_at,
          cp.id,
@@ -667,6 +678,17 @@ as $$
     left join public.profiles cp
            on cp.id = case when mine.participant_1 = p_user
                            then mine.participant_2 else mine.participant_1 end
+    -- The deal's human-readable reference, so a client can LABEL a deal thread
+    -- ("STN-…") without a second round trip per conversation. Without it the
+    -- inbox holds two threads with the same counterparty name — a plain DM and a
+    -- deal thread — and no way to tell them apart, which is exactly the
+    -- confusion the deal_id column exists to remove.
+    --
+    -- reference_number ONLY. Not commodity, quantity, price or counterparty
+    -- terms: per master section 3 the reference is an existence/stage identifier
+    -- that third parties may see, while commercial terms are never carried by
+    -- it. An inbox listing is not the place to widen that.
+    left join public.deals d on d.id = mine.deal_id
     left join last_msg on last_msg.conversation_id = mine.id
     left join unread   on unread.conversation_id   = mine.id
    order by mine.last_message_at desc nulls last;

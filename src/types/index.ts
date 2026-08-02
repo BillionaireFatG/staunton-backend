@@ -217,7 +217,19 @@ export interface ConversationSummary {
   participant_1: string
   participant_2: string
   participants: string[]
+  /**
+   * Set on a deal thread, null on a plain DM. A pair of firms may hold BOTH at
+   * once — one DM plus one thread per deal — so this is what distinguishes two
+   * otherwise identical-looking entries in the same inbox.
+   */
   deal_id: string | null
+  /**
+   * The deal's human-readable reference (e.g. `STN-…`), so a deal thread can be
+   * labelled without a per-conversation round trip. Null on a plain DM.
+   *
+   * Deliberately the reference ONLY — no commodity, quantity, price or terms.
+   */
+  deal_reference: string | null
   last_message_at: string | null
   /** Messages in THIS conversation, not sent by the caller, still unread. */
   unread_count: number

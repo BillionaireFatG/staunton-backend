@@ -288,7 +288,8 @@ message, or `null`.
 ```ts
 ConversationSummary {
   id, participant_1, participant_2, participants: string[],
-  deal_id: string | null,
+  deal_id: string | null,          // set on a deal thread, null on a plain DM
+  deal_reference: string | null,   // e.g. "STN-…", for labelling. Reference only, no terms.
   last_message_at, created_at,
   unread_count: number,                 // per-conversation, for unread pills
   counterparty: { id, full_name, company_name, avatar_url } | null,
@@ -319,6 +320,13 @@ validated JWT and is never read from the body.
 via the same predicate as `GET /api/deals/:id`, so a non-party gets `404` (not `403`) and the endpoint
 is not an existence oracle for deal ids. `GET` and `POST` are the same find-or-create operation and
 return the same body.
+
+**A deal thread is a SEPARATE row from the plain DM between the same two people.** A pair of firms
+may hold one DM plus one thread per deal simultaneously — enforced by two partial unique indexes
+(one DM per pair; one thread per pair per deal). `GET /api/messages/conversations` returns **both**,
+so an inbox will show two entries with the same counterparty name unless you distinguish them.
+Use `deal_id` to tell them apart and `deal_reference` to label the deal thread. Do not merge them,
+and do not present one as the other.
 
 Two deliberate `409`s: a deal with no counterparty, and a deal with **more than one** counterparty
 (buyer + seller + broker). The deployed `conversations` table is a two-column pair and cannot

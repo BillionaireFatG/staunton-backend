@@ -173,6 +173,9 @@ export async function getConversations(userId: string, limit = 50): Promise<Conv
     participant_2: r.participant_2,
     participants: [r.participant_1, r.participant_2],
     deal_id: r.deal_id ?? null,
+    // Present only on a deal thread, so clients can label it without a second
+    // round trip per conversation. Null on a plain DM.
+    deal_reference: r.deal_reference ?? null,
     last_message_at: r.last_message_at,
     created_at: r.created_at,
     unread_count: r.unread_count ?? 0,
