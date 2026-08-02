@@ -33,20 +33,36 @@ export interface DealEvent {
   created_by: string
 }
 
+// Mirrors the DEPLOYED `profiles` table, column for column. Verified against
+// the live database via PostgREST, not read off a migration file — migration
+// 011 dropped and recreated tables and several migrations describe columns that
+// were never applied.
+//
+// Removed from this interface: `roles: string[]`, `is_verified: boolean` and
+// `trust_score: number`. None of the three exists in production. They were
+// declared REQUIRED here, so every consumer was type-safe against a shape the
+// database cannot return — `profile.trust_score` compiled and was always
+// `undefined`. Singular `role` is the real column.
+//
+// `email` and `is_admin` are real, and are deliberately NOT included in the
+// projections returned by GET /api/profiles/search or GET /api/profiles/:id.
+// They appear here because GET /api/profiles/me returns the caller's own row.
 export interface Profile {
   id: string
   created_at: string
+  updated_at?: string
   full_name: string
-  avatar_url?: string
-  roles: string[]
-  is_verified: boolean
-  trust_score: number
-  bio?: string
+  email?: string
+  avatar_url?: string | null
+  role?: string | null
+  is_admin?: boolean
+  bio?: string | null
   company_name?: string | null
   phone?: string | null
   location?: string | null
   verification_status?: string
   verification_requested_at?: string | null
+  verified_at?: string | null
 }
 
 // Mirrors the `user_loyalty` table (Frontend migration 007_loyalty_rewards.sql).
