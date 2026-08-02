@@ -223,14 +223,74 @@ as a table.
 
 | File | Contents | Applied? |
 |---|---|---|
-| `0001_notification_preferences.sql` | Creates `public.notification_preferences` (one row per user, backs Settings → Notifications) | **No** — table absent from the dev database as of 2026-08-01 |
+| `0001_notification_preferences.sql` | Creates `public.notification_preferences` (one row per user, backs Settings → Notifications) | **No** — table still absent from the live database (verified 2026-08-02) |
 | `0002_profiles_value_fields.sql` | Idempotent `add column if not exists` for `profiles.company_name`, `phone`, `location` and the verification-request fields | Partially — see drift note below |
 | `0003_redeem_reward_atomic.sql` | Atomic `redeem_reward` RPC (tier gate + single-statement point decrement) | Yes |
-| `0004_scope_has_permission.sql` | **Security.** `CREATE OR REPLACE`s `has_permission` to scope role grants by `org_id` | **No — must be applied by hand** |
+| `0004_scope_has_permission.sql` | **Security.** Scopes `has_permission` role grants by `org_id` | Yes |
+| `0005_emergency_rls_hardening.sql` | **Security.** RLS hardening sweep. Its `profiles` column REVOKEs were **INERT** — see `0010` | Yes (but partly ineffective) |
+| `0007_fix_loyalty_tier_rank_cast.sql` | Fixes the enum cast in `loyalty_tier_rank` | Yes |
+| `0008_fix_redeem_ambiguous_column.sql` | Fixes `column reference "available_points" is ambiguous` in `redeem_reward` | Yes |
+| `0009_messaging_authz_hardening.sql` | **Security + functional.** Message-forgery lockdown, anon revoke on chat, `conversations.deal_id`, `conversation_list()`, creates `voice_room_messages` | **NO — APPLY FIRST. See below.** |
+| `0010_fix_profiles_privilege_revoke.sql` | **Security.** Repairs `0005`'s inert column REVOKE (self-grant of platform admin) | Yes — adversarially verified |
+| `0011_subscriptions_foundation.sql` | Subscription plans, key/value entitlements, atomic state changes. No payment provider | **No** — apply after `0009` |
 
 There is no migration runner wired up — these are applied by hand against Supabase, and nothing
 verifies that they have been. Every file here is written to be **idempotent and safe to re-run**;
 when you apply one, tick it off in the table above.
+
+### ⚠️ Pending: apply `0009`, then `0011`
+
+**`0009` is both a live security hole and the reason chat is currently broken.** Apply it first.
+
+**Why it is urgent — confirmed by exploit, not by reading policy source.** With two real logged-in
+user tokens against the live database, one conversation participant rewrote the other party's
+message and reattributed it to himself. The stored row came back
+`content = "FORGED: offer 500t at 200.00"` (was `973.25`), `sender_id` = the attacker. In plain
+terms: **one member can silently rewrite another member's message and change who it came from**, on
+a platform whose proposition is that the record is worth something to a counterparty. Separately,
+the browser-shipped publishable key can read `global_messages.content` and
+`voice_rooms.agora_channel_name` — and this backend mints no Agora token, so that channel name is
+the closest thing to a join credential that exists.
+
+**Why chat is broken:** `GET /api/messages/conversations` calls `conversation_list()`, which `0009`
+creates. Until it is applied the endpoint returns `503` naming the migration.
+
+```
+1. Paste migrations/0009_messaging_authz_hardening.sql into the Supabase SQL editor and run it.
+   Expect: "preflight OK: messages/conversations are on the expected 003 schema",
+   then NOTICE lines for F-7, F-8, F-16, voice_room_messages, and deal threads.
+   A WARNING about a missing table means that part was skipped — read it, do not ignore it.
+
+2. npm run verify:messaging
+```
+
+`verify:messaging` detects whether `0009` is applied and flips its expectations, so it is meaningful
+before *and* after. **Run it before applying too, and keep both outputs** — the pair is the evidence,
+either alone is not. Before, every exploit must reproduce; after, every exploit must be denied *and*
+the one legitimate client write (a recipient marking messages read) must still work.
+
+**Do not accept "the migration ran without error" as proof.** That is exactly how `0005` shipped
+inert: it printed a success notice and changed nothing, leaving the most severe finding in the audit
+open. A pre-migration *denial* is scored as a FAILURE by the harness precisely so it cannot pass
+vacuously.
+
+Then, when convenient:
+
+```
+3. Paste migrations/0011_subscriptions_foundation.sql and run it.
+   Expect: "preflight OK: organizations present", then notices for the seed and the lockdown.
+
+4. npm run verify:subscriptions      (exits 2 if 0011 is not applied)
+```
+
+`0011` seeds every paid plan **inactive with no price**, so `POST /api/subscriptions/me` returns
+`409 plan_inactive` for all of them. That is the designed behaviour — nothing is sellable until you
+set real pricing. A `CHECK` constraint enforces that activating a plan requires a real,
+non-placeholder price, so the guarantee survives a stray `UPDATE`.
+
+Both verification scripts need `PROBE_ANON_KEY` in `.env` (the publishable key from
+`Frontend/.env.local` — not a secret; it already ships in the browser bundle). Without it they
+cannot ask the question that matters: what an unauthenticated caller can reach.
 
 ### Recommendation: make the backend the schema-of-record
 
