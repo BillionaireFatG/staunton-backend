@@ -110,6 +110,24 @@ those, and the deployed database does not have them — the real objects are `us
 (`total_points`, `available_points`, `lifetime_points`) and `reward_redemptions`. Every loyalty
 endpoint was dead until that drift was corrected.
 
+#### Known live drift (probed 2026-08-01, still outstanding)
+
+The loyalty case was not the only one. Probing the dev database with the service-role key found
+these; each one makes the listed endpoints return 500 today, so treat them as **broken, not
+secured**:
+
+| Code expects | Live database | Endpoints affected |
+|---|---|---|
+| `voice_rooms.is_active` | column does not exist (`is_public` is the real flag) | `GET /api/voice-rooms` |
+| `voice_room_messages` table | does not exist | `GET`/`POST /api/voice-rooms/:id/messages` |
+| `profiles.trust_score`, `profiles.is_verified`, `profiles.roles` | none exist (`role` singular and `verification_status` do) | `GET /api/profiles/search`, `GET /api/profiles/:id`, `GET /api/voice-rooms/:id/participants`, `GET /api/deals/counterparties/search`, `PATCH /api/profiles/me` when `roles` is sent |
+| `notification_preferences` table | does not exist (`0001` never applied) | `/api/notifications/*` |
+
+Authorization fixes have still been applied to these paths. An endpoint that is broken today is not
+a reason to leave it unauthorized tomorrow — the moment the drift is repaired, the missing check
+would have become live. Resolving the drift is a separate piece of work and needs a decision on
+which side moves (add the columns, or change the code to the deployed shape).
+
 ### Objects this backend requires but does NOT own
 
 These are defined in **`Frontend/supabase/migrations/`**, a different git repository. Changing or
@@ -121,7 +139,15 @@ dropping any of them breaks this API, and nothing in this repo will warn you.
 |---|---|
 | `approve_organization(p_org, p_admin_member)` | `015_approval.sql` |
 | `promote_to_full(...)` | `016_onboarding.sql` |
-| `has_permission(...)` | `017_roles_badges.sql` |
+| `org_status_permits(p_status, p_permission)` | `017_roles_badges.sql` |
+| `has_permission(...)` | originally `017_roles_badges.sql` — **now owned here**, see below |
+
+> **`has_permission` has moved to this repo.** `migrations/0004_scope_has_permission.sql`
+> `CREATE OR REPLACE`s it to close a cross-tenant privilege escalation: the 017 definition joined
+> `member_roles` without filtering on `org_id`, so a role granted inside one org satisfied a
+> permission check asked about **any other org**. **Do not re-apply `017_roles_badges.sql` after
+> `0004`** — it would silently reinstate the vulnerable definition. If 017 must be re-run for its
+> tables or triggers, re-apply `0004` immediately afterwards.
 
 **View**
 
@@ -161,14 +187,16 @@ as a table.
 
 ### Objects this backend does own
 
-`migrations/` in this repo currently holds only two files:
+| File | Contents | Applied? |
+|---|---|---|
+| `0001_notification_preferences.sql` | Creates `public.notification_preferences` (one row per user, backs Settings → Notifications) | **No** — table absent from the dev database as of 2026-08-01 |
+| `0002_profiles_value_fields.sql` | Idempotent `add column if not exists` for `profiles.company_name`, `phone`, `location` and the verification-request fields | Partially — see drift note below |
+| `0003_redeem_reward_atomic.sql` | Atomic `redeem_reward` RPC (tier gate + single-statement point decrement) | Yes |
+| `0004_scope_has_permission.sql` | **Security.** `CREATE OR REPLACE`s `has_permission` to scope role grants by `org_id` | **No — must be applied by hand** |
 
-| File | Contents |
-|---|---|
-| `0001_notification_preferences.sql` | Creates `public.notification_preferences` (one row per user, backs Settings → Notifications) |
-| `0002_profiles_value_fields.sql` | Idempotent `add column if not exists` for `profiles.company_name`, `phone`, `location` and the verification-request fields |
-
-There is no migration runner wired up — these are applied by hand against Supabase.
+There is no migration runner wired up — these are applied by hand against Supabase, and nothing
+verifies that they have been. Every file here is written to be **idempotent and safe to re-run**;
+when you apply one, tick it off in the table above.
 
 ### Recommendation: make the backend the schema-of-record
 
