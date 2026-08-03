@@ -37,6 +37,26 @@
 -- Deal creation already goes through the backend (no direct client insert found).
 -- Deal READS (dashboard lists, detail, realtime) are unaffected.
 --
+-- ── SEQUENCING — READ BEFORE APPLYING (confirmed with the frontend lane) ─────
+-- Applying this BREAKS in-app deal create AND update until the frontend cuts
+-- over, and that cutover is NOT a transport swap — it needs a product decision:
+--   * POST /api/deals accepts only {seller_id, commodity_type, quantity,
+--     unit_price, delivery_location, notes} and forces buyer_id = caller. The
+--     create wizard also collects currency, tank_farm, both dates, vessel_name,
+--     and a buyer-vs-seller ROLE (a seller-initiated deal has no backend path
+--     today). PATCH /api/deals/:id accepts only {status, notes} but the UI also
+--     edits tank_farm/dates/vessel_name.
+--   * So a cutover would silently drop fields (a charter violation) unless the
+--     backend contract is widened OR the wizard is narrowed. That choice overlaps
+--     the deal-spine redesign in STAUNTON-MASTER.md §3 and is a founder/design
+--     call, tracked as its own initiative — deliberately NOT decided here.
+-- Low-cost to apply now regardless: no deals exist in the pilot yet, and 0012
+-- only nulls counterparty embeds (deal rows still read; getDeals/getDeal now
+-- hydrate counterparties server-side). But know that direct create/update is
+-- dead between applying this and shipping the deals-write initiative — which is
+-- precisely why the reprice/mass-assignment hole it closes needs prioritising,
+-- not why it should be deferred.
+--
 -- IDEMPOTENT: guarded on table existence; safe to re-run.
 -- ============================================================================
 

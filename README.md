@@ -340,7 +340,7 @@ silently — the backend service role is unaffected because it bypasses RLS):
 |---|---|
 | `0012` | cross-member `profiles` reads (`GlobalSearch`, `profile/[userId]`, deals counterparty join, `master-helpers`) → `public_profiles` view **or** `GET /api/profiles/:id` / `GET /api/profiles/search`. Own-row reads (middleware gate) and sign-in are **not** affected. |
 | `0014` | `master-helpers.ts requestVerification` browser write of `verification_status` → `POST /api/profiles/me/verify` (already implemented). |
-| `0015` | `lib/supabase/deals.ts updateDeal()` → `PATCH /api/deals/:id`; `createDealEvent()` → `POST /api/deals/:id/events`. Deal reads/realtime unaffected. |
+| `0015` | `lib/supabase/deals.ts updateDeal()` → `PATCH /api/deals/:id`; `createDealEvent()` → `POST /api/deals/:id/events`. Deal reads/realtime unaffected. **Not a transport swap** — the backend create/update contract is narrower than the create wizard collects (no `currency`/`tank_farm`/dates/`vessel_name`, no seller-initiated path; PATCH is `{status, notes}` only). Cutting over means widening the backend contract **or** narrowing the wizard, a product decision that overlaps the deal-spine redesign (MASTER §3) — its own initiative. Applying `0015` kills in-app deal create/update until that lands; low-cost now (no pilot deals yet) and the reprice hole is why it should be prioritised, not deferred. |
 
 **`member_status` values (frontend contract):** `none | invited | applied | in_review | approved |
 rejected | suspended`, default `none`. Only `approved` opens `/dashboard`. `member_tier`:
