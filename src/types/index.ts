@@ -10,6 +10,18 @@ export type DealStatus =
 
 export type LoyaltyTier = 'bronze' | 'silver' | 'gold' | 'platinum' | 'diamond'
 
+// Non-sensitive counterparty projection hydrated into deal reads by the backend
+// (service role) so clients never have to embed profiles directly — which the
+// profiles PII lockdown (0012) blocks for cross-member reads anyway. Deliberately
+// the same safe subset as GET /api/profiles/:id: NO email, phone or is_admin.
+export interface DealParty {
+  id: string
+  full_name: string | null
+  company_name: string | null
+  avatar_url: string | null
+  verification_status: string | null
+}
+
 export interface Deal {
   id: string
   created_at: string
@@ -22,6 +34,11 @@ export interface Deal {
   price: number
   location: string
   notes?: string
+  // Hydrated by getDeals/getDeal via the service role; null when the id is unset
+  // (e.g. no broker) or the referenced profile is missing.
+  buyer?: DealParty | null
+  seller?: DealParty | null
+  broker?: DealParty | null
 }
 
 export interface DealEvent {

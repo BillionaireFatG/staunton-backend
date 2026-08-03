@@ -43,6 +43,18 @@ function clampLimit(requested: number | undefined, max: number, fallback: number
   return Math.min(Math.max(Math.trunc(requested as number), 1), max)
 }
 
+// Counterparty hydration. The frontend used to embed profiles directly off the
+// deals read (`buyer:buyer_id(...)`), but the profiles PII lockdown (0012)
+// blocks cross-member profiles reads, so those embeds now return null. The
+// service role bypasses RLS, so the backend does the join here and returns the
+// same NON-SENSITIVE subset (never email/phone). deals has four FKs into
+// profiles; PostgREST disambiguates each embed by its FK column name.
+const DEAL_SELECT =
+  '*,' +
+  'buyer:buyer_id(id, full_name, company_name, avatar_url, verification_status),' +
+  'seller:seller_id(id, full_name, company_name, avatar_url, verification_status),' +
+  'broker:broker_id(id, full_name, company_name, avatar_url, verification_status)'
+
 export async function createDeal(data: {
   buyer_id: string
   seller_id: string
@@ -95,7 +107,7 @@ export async function getDeals(
 
   let q = supabase
     .from('deals')
-    .select('*')
+    .select(DEAL_SELECT)
     .or(`buyer_id.eq.${userId},seller_id.eq.${userId},broker_id.eq.${userId}`)
     .order('created_at', { ascending: false })
     .limit(limit)
@@ -105,20 +117,24 @@ export async function getDeals(
 
   const { data, error } = await q
   if (error) throw new Error(error.message)
-  return data ?? []
+  // Cast through unknown: the embedded select string defeats supabase-js's
+  // relational type inference (the client is untyped — no Database generic), so
+  // it widens to an error-string type at compile time though the runtime shape
+  // is Deal[] with the hydrated buyer/seller/broker subsets.
+  return (data ?? []) as unknown as Deal[]
 }
 
 export async function getDeal(id: string, userId: string): Promise<Deal> {
   const { data, error } = await supabase
     .from('deals')
-    .select('*')
+    .select(DEAL_SELECT)
     .eq('id', id)
     .or(`buyer_id.eq.${userId},seller_id.eq.${userId},broker_id.eq.${userId}`)
     .single()
 
   // 404 rather than 403 for a non-party: a 403 would confirm the id exists.
   if (error || !data) throw Object.assign(new Error('Deal not found'), { statusCode: 404 })
-  return data
+  return data as unknown as Deal // see getDeals: embedded select defeats inference
 }
 
 /**

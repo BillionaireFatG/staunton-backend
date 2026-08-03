@@ -18,7 +18,7 @@
 import 'dotenv/config'
 import { createClient } from '@supabase/supabase-js'
 import { randomUUID } from 'node:crypto'
-import { createDeal, updateDeal } from '../src/services/deals'
+import { createDeal, updateDeal, getDeals } from '../src/services/deals'
 
 const URL_ = process.env.SUPABASE_URL
 const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -98,6 +98,14 @@ async function main() {
       const upd = await updateDeal(dealId, alice.id, { status: 'pending' })
       if (upd.status === 'pending') pass('[still works] backend updateDeal() sets status')
       else fail(`[BROKE] backend updateDeal returned status=${upd.status}`)
+
+      // Counterparty hydration (server-side join; replaces the frontend embed
+      // that 0012 blocks). Must return the subset, never email.
+      const list = await getDeals(alice.id, { limit: 5 })
+      const hydrated = list.find((d) => d.id === dealId)
+      if (hydrated?.buyer?.id === alice.id && hydrated?.seller?.id === bob.id && hydrated?.seller?.full_name)
+        pass(`[still works] getDeals hydrates counterparties (seller=${hydrated.seller.full_name}, no email field=${!('email' in (hydrated.seller as object))})`)
+      else fail(`[BROKE] getDeals did not hydrate buyer/seller: ${JSON.stringify({ buyer: hydrated?.buyer, seller: hydrated?.seller })}`)
     } catch (e: any) {
       fail(`[BROKE] backend deal write path threw: ${e?.message}`)
       throw e
