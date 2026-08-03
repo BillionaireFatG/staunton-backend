@@ -38,6 +38,17 @@ export async function getPublicProfile(userId: string) {
 // boundary: the service-role client bypasses RLS, so a blind spread of client
 // input would let a caller set is_admin / trust_score / verification_status /
 // is_verified etc. We explicitly whitelist-pick instead. `null` clears a value.
+//
+// This is an UPDATE, not an upsert. The previous implementation called
+// `.upsert()` with a patch that never included `email` — and `profiles.email`
+// is NOT NULL with no default. supabase-js `.upsert()` compiles to
+// `INSERT ... ON CONFLICT (id) DO UPDATE`, and Postgres enforces the NOT NULL
+// on the tuple it builds for the INSERT arbiter BEFORE the conflict is
+// resolved. So for any user whose profile row did not already exist, a plain
+// profile edit failed the NOT NULL and 500'd (reported by the frontend lane).
+// The profile row is created at sign-up / auth-callback, so the correct
+// operation here is an UPDATE of an existing row; a missing row is a real 404,
+// not something to paper over by fabricating an INSERT without the user's email.
 export async function upsertProfile(userId: string, patch: {
   full_name?: string
   bio?: string | null
@@ -51,7 +62,6 @@ export async function upsertProfile(userId: string, patch: {
   }
 
   const update: Record<string, unknown> = {
-    id: userId,
     updated_at: new Date().toISOString(),
   }
   if (patch.full_name !== undefined) update.full_name = patch.full_name
@@ -69,11 +79,22 @@ export async function upsertProfile(userId: string, patch: {
 
   const { data, error } = await supabase
     .from('profiles')
-    .upsert(update)
+    .update(update)
+    .eq('id', userId)
     .select()
-    .single()
+    .maybeSingle()
 
   if (error) throw new Error(error.message)
+  // `.update()` of a non-existent row affects zero rows and returns null rather
+  // than erroring. That means the profile row does not exist yet — surface it as
+  // a 404 instead of returning null and letting the route serialize it as a
+  // success with an empty body.
+  if (!data) {
+    throw Object.assign(
+      new Error('Profile not found — complete sign-up before editing your profile'),
+      { statusCode: 404 },
+    )
+  }
   return data
 }
 
