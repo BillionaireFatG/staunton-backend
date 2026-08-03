@@ -58,6 +58,30 @@ begin
 end $$;
 
 
+-- ── Do not lock the operators out of their own platform ──────────────────────
+-- The frontend /dashboard gate redirects every non-'approved' status (incl. the
+-- new 'none' default) to /apply, and it does NOT special-case admins. So the
+-- moment this column exists, a platform admin whose row defaults to 'none' would
+-- be bounced to /apply — including the founder's own account. Auto-approve
+-- existing admins. This is safe: is_admin already confers full platform
+-- authority, so gating an admin from the dashboard protects nothing. Scoped to
+-- rows still at the default so it never overrides a deliberate status, and
+-- idempotent.
+do $$
+declare n int;
+begin
+  update public.profiles
+     set member_status = 'approved'
+   where is_admin = true
+     and member_status = 'none';
+  get diagnostics n = row_count;
+  raise notice 'profiles: % admin row(s) auto-approved (member_status none -> approved)', n;
+end $$;
+-- NOTE: ordinary/pilot members are deliberately left at 'none'. Approving a
+-- member firm is a vetting decision (admin / vetting flow, service-role write),
+-- not something this migration should presume.
+
+
 -- CHECK constraints pin the enums at the database so a stray service-role write
 -- cannot put a value the gate does not understand into the column that decides
 -- access. Added NOT VALID-then-VALIDATE is unnecessary here because every
