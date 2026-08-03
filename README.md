@@ -233,6 +233,11 @@ as a table.
 | `0009_messaging_authz_hardening.sql` | **Security + functional.** Message-forgery lockdown, anon revoke on chat, `conversations.deal_id`, `conversation_list()`, creates `voice_room_messages` | **NO — APPLY FIRST. See below.** |
 | `0010_fix_profiles_privilege_revoke.sql` | **Security.** Repairs `0005`'s inert column REVOKE (self-grant of platform admin) | Yes — adversarially verified |
 | `0011_subscriptions_foundation.sql` | Subscription plans, key/value entitlements, atomic state changes. No payment provider | **No** — apply after `0009` |
+| `0012_profiles_pii_select_lockdown.sql` | **Security (CRITICAL).** Revokes anon SELECT on `profiles` (live PII leak), restricts base-table SELECT to own-row + admin, adds the `public_profiles` subset view | **No** — pilot batch, apply FIRST |
+| `0013_profiles_membership_columns.sql` | **Gate.** Adds `profiles.member_status` (default `none`) + `member_tier` — the columns the frontend auth gate reads | **No** — pilot batch |
+| `0014_profiles_write_lockdown_verification.sql` | **Security.** Locks `verification_status` / `verification_requested_at` / `member_status` / `member_tier` to service-role writes (supersedes `0010`'s writable list) | **No** — pilot batch, apply after `0010`+`0013` |
+| `0015_deals_write_lockdown.sql` | **Security (financial).** Revokes all client INSERT/UPDATE/DELETE on `deals`/`deal_events`/`inspections` (reprice + mass-assignment). Reads/realtime retained | **No** — pilot batch |
+| `0016_avatars_bucket_hardening.sql` | **Security.** Closes anon bucket listing, sets 5 MB + image-only limits, restores owner-scoped avatar writes | **No** — pilot batch |
 
 There is no migration runner wired up — these are applied by hand against Supabase, and nothing
 verifies that they have been. Every file here is written to be **idempotent and safe to re-run**;
@@ -291,6 +296,56 @@ non-placeholder price, so the guarantee survives a stray `UPDATE`.
 Both verification scripts need `PROBE_ANON_KEY` in `.env` (the publishable key from
 `Frontend/.env.local` — not a secret; it already ships in the browser bundle). Without it they
 cannot ask the question that matters: what an unauthenticated caller can reach.
+
+### 🚨 Pending: the pilot security batch (`0012`–`0016`)
+
+Five migrations that close confirmed-live holes blocking the pilot. All are idempotent and
+self-contained. **Apply them by hand in the Supabase SQL editor, in this order:**
+
+```
+0012_profiles_pii_select_lockdown.sql        # WORST — anon reads every member's email. Apply FIRST.
+0013_profiles_membership_columns.sql         # adds member_status / member_tier (the gate's columns)
+0014_profiles_write_lockdown_verification.sql# locks the self-settable "verified" flag + the gate columns
+0015_deals_write_lockdown.sql                # deals reprice / mass-assignment
+0016_avatars_bucket_hardening.sql            # anon bucket listing + size/MIME limits
+```
+
+Order matters: `0014` re-grants the profiles write surface and must run **after** `0013` adds
+`member_status`/`member_tier` (so they end up excluded from the writable set) and after `0010`.
+`0012`/`0015`/`0016` are independent and may be applied in any order relative to each other.
+
+Each migration ends with expected output and copy-paste verification SQL. A `NOTICE` is progress;
+a `WARNING` means a guarded step was skipped (a table/function was absent) — read it, do not ignore
+it, exactly as with `0005`/`0009`.
+
+**Prove it, before and after — do not accept "it ran without error" (that is how `0005` shipped
+inert):**
+
+```
+npm run verify:profiles   # 0012 + 0013 + 0014 + the upsertProfile 500 regression + admin reads
+npm run verify:deals      # 0015 — reprice / fabricate blocked, backend write + reads still work
+npm run verify:avatars    # 0016 — anon cannot list, limits set, owner-scoped writes
+```
+
+Each harness **detects whether its migration is applied and flips expectations**: run it BEFORE
+(every exploit must reproduce against the live DB with a real anon/authenticated token) and AFTER
+(every exploit denied `42501`, every legitimate path still works). Keep both outputs — the pair is
+the evidence. They need `PROBE_ANON_KEY`, create + delete their own throwaway users/objects, and
+refuse `NODE_ENV=production`.
+
+**Cross-layer follow-ups these create for the frontend lane** (documented so nothing breaks
+silently — the backend service role is unaffected because it bypasses RLS):
+
+| After | These direct-Supabase client calls stop working — reroute to |
+|---|---|
+| `0012` | cross-member `profiles` reads (`GlobalSearch`, `profile/[userId]`, deals counterparty join, `master-helpers`) → `public_profiles` view **or** `GET /api/profiles/:id` / `GET /api/profiles/search`. Own-row reads (middleware gate) and sign-in are **not** affected. |
+| `0014` | `master-helpers.ts requestVerification` browser write of `verification_status` → `POST /api/profiles/me/verify` (already implemented). |
+| `0015` | `lib/supabase/deals.ts updateDeal()` → `PATCH /api/deals/:id`; `createDealEvent()` → `POST /api/deals/:id/events`. Deal reads/realtime unaffected. |
+
+**`member_status` values (frontend contract):** `none | invited | applied | in_review | approved |
+rejected | suspended`, default `none`. Only `approved` opens `/dashboard`. `member_tier`:
+`principal | direct_mandate` or `NULL`. Existing rows default to `none`, so a pilot member must be
+moved to `approved` (admin / vetting flow, service-role write) to reach the dashboard.
 
 ### Recommendation: make the backend the schema-of-record
 
